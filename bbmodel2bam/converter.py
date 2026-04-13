@@ -257,6 +257,9 @@ def _mesh_geom(name, verts, flist, origin, rw, rh, sc):
     tris = GeomTriangles(Geom.UH_static)
     idx = 0
 
+    # Compute mesh centroid for winding correction
+    centroid = _mesh_centroid(verts, flist, origin, sc)
+
     for fd in flist:
         vids = fd.get('vertices', [])
         uv_map = fd.get('uv', {})
@@ -283,6 +286,12 @@ def _mesh_geom(name, verts, flist, origin, rw, rh, sc):
             continue
 
         normal = _face_normal(*positions[:3])
+
+        # Ensure face normal points away from mesh centroid
+        positions, uvs, normal = _ensure_outward(
+            positions, uvs, normal, centroid,
+        )
+
         base = idx
         for pos, uv in zip(positions, uvs):
             vw.add_data3(*pos)
@@ -290,9 +299,9 @@ def _mesh_geom(name, verts, flist, origin, rw, rh, sc):
             tw.add_data2(*uv)
             idx += 1
 
-        # Fan triangulation (reverse winding: BB is CW, Panda3D is CCW)
+        # Fan triangulation
         for t in range(1, len(positions) - 1):
-            tris.add_vertices(base, base + t + 1, base + t)
+            tris.add_vertices(base, base + t, base + t + 1)
 
     if idx == 0:
         return None
@@ -371,6 +380,13 @@ def _cube_geom(name, x0, y0, z0, x1, y1, z1, face_list, origin, rw, rh, sc):
     tris = GeomTriangles(Geom.UH_static)
     idx = 0
 
+    # Cube centroid for winding correction
+    centroid = _cv(
+        (x0 + x1) / 2 - origin[0],
+        (y0 + y1) / 2 - origin[1],
+        (z0 + z1) / 2 - origin[2], sc,
+    )
+
     for fname, fd in face_list:
         corners_bb = _cube_face_verts(x0, y0, z0, x1, y1, z1, fname)
         if not corners_bb:
@@ -402,15 +418,19 @@ def _cube_geom(name, x0, y0, z0, x1, y1, z1, face_list, origin, rw, rh, sc):
             steps = rot // 90
             face_uvs = face_uvs[-steps:] + face_uvs[:-steps]
 
+        # Ensure face normal points away from cube centroid
+        positions, face_uvs, normal = _ensure_outward(
+            positions, face_uvs, normal, centroid,
+        )
+
         base = idx
         for pos, fuv in zip(positions, face_uvs):
             vw.add_data3(*pos)
             nw.add_data3(normal)
             tw.add_data2(*fuv)
             idx += 1
-        # Reverse winding: BB is CW, Panda3D is CCW
-        tris.add_vertices(base, base + 2, base + 1)
-        tris.add_vertices(base, base + 3, base + 2)
+        tris.add_vertices(base, base + 1, base + 2)
+        tris.add_vertices(base, base + 2, base + 3)
 
     if idx == 0:
         return None
@@ -426,10 +446,43 @@ def _cube_geom(name, x0, y0, z0, x1, y1, z1, face_list, origin, rw, rh, sc):
 # ---------------------------------------------------------------------------
 
 def _face_normal(p0, p1, p2):
-    """Compute face normal from three points (reversed for CW->CCW flip)."""
+    """Compute face normal from three points via right-hand rule."""
     v0 = LVector3f(*p0)
     v1 = LVector3f(*p1)
     v2 = LVector3f(*p2)
-    n = (v2 - v0).cross(v1 - v0)
+    n = (v1 - v0).cross(v2 - v0)
     n.normalize()
     return n
+
+
+def _mesh_centroid(verts, flist, origin, sc):
+    """Average of all transformed vertex positions used by the face list."""
+    seen = set()
+    sx = sy = sz = 0.0
+    for fd in flist:
+        for vid in fd.get('vertices', []):
+            if vid in seen or vid not in verts:
+                continue
+            seen.add(vid)
+            vp = verts[vid]
+            rel = (vp[0] - origin[0], vp[1] - origin[1], vp[2] - origin[2])
+            px, py, pz = _cv(*rel, sc)
+            sx += px; sy += py; sz += pz
+    n = len(seen) or 1
+    return (sx / n, sy / n, sz / n)
+
+
+def _ensure_outward(positions, uvs, normal, centroid):
+    """Reverse vertex winding if the face normal points toward the centroid."""
+    n = len(positions)
+    fcx = sum(p[0] for p in positions) / n
+    fcy = sum(p[1] for p in positions) / n
+    fcz = sum(p[2] for p in positions) / n
+    # Vector from centroid to face center
+    tx, ty, tz = fcx - centroid[0], fcy - centroid[1], fcz - centroid[2]
+    dot = normal[0] * tx + normal[1] * ty + normal[2] * tz
+    if dot < 0:
+        positions = positions[::-1]
+        uvs = uvs[::-1]
+        normal = _face_normal(*positions[:3])
+    return positions, uvs, normal
